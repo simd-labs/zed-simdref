@@ -43,6 +43,10 @@ Each command the extension runs (uv download extract, `uv tool install simdref`,
 
 In Zed, run `zed: install dev extension` and select this directory.
 
+## Troubleshooting
+
+If simdref-lsp is on PATH, the extension uses it; inlay hints need simdref 0.0.8 or newer (`uv tool upgrade simdref`).
+
 ## License
 
 GPL-3.0-or-later, the same license as simdref. See `LICENSE`.

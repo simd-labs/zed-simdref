@@ -92,23 +92,23 @@ fn ensure_uv(id: &LanguageServerId, work: &Path) -> Result<PathBuf> {
         return Ok(uv);
     }
     set_status(id, &Status::CheckingForUpdate);
-    let release = zed::latest_github_release(
-        "astral-sh/uv",
-        zed::GithubReleaseOptions {
-            require_assets: true,
-            pre_release: false,
-        },
-    )?;
+    // Pinned uv release. Bump UV_TAG to move to a newer uv.
+    const UV_TAG: &str = "0.12.23";
     let name = format!("{stem}.{suffix}");
-    let asset = release
-        .assets
-        .iter()
-        .find(|a| a.name == name)
-        .ok_or_else(|| format!("uv release {} has no asset {name}", release.version))?;
+    let url =
+        format!("https://github.com/astral-sh/uv/releases/download/{UV_TAG}/{name}");
     set_status(id, &Status::Downloading);
-    let result = download_extract(&asset.download_url, &name, work).map_err(|cause| {
-        format!("failed to download {name}: {cause}")
-    });
+    // Record the pinned download in install.log. zed::download_file is a host
+    // call, so `run` never sees it.
+    let record = format!("download: {url}\nsha256: {url}.sha256\n---\n");
+    fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(work.join("install.log"))
+        .and_then(|mut f| std::io::Write::write_all(&mut f, record.as_bytes()))
+        .ok();
+    let result = download_extract(&url, &name, work)
+        .map_err(|cause| format!("failed to download {name}: {cause}"));
     if result.is_err() {
         fs::remove_file(work.join(&name)).ok();
         fs::remove_file(work.join(format!("{name}.sha256"))).ok();
