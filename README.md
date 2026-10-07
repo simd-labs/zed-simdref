@@ -1,5 +1,8 @@
 # zed-simdref
 
+![simdref inlay hints in a .s file in Zed](https://raw.githubusercontent.com/simd-labs/zed-simdref/screenshots/zed-asm.png)
+![simdref inlay hints in a .cpp file in Zed](https://raw.githubusercontent.com/simd-labs/zed-simdref/screenshots/zed-cpp.png)
+
 A Zed extension that starts `simdref-lsp` for Assembly, C and C++ buffers. The server returns SIMD instruction reference text as inlay hints at the right of each line. Zed asks every language server on a buffer for inlay hints and merges them, so simdref runs next to clangd.
 
 The extension needs the Zed `assembly` extension to get hints in `.s` files. That extension defines the Assembly language. Without it, Zed does not parse `.s` files and simdref does not start in them. Hints in C and C++ buffers do not need it.
