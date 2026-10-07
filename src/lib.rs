@@ -11,6 +11,9 @@ use zed_extension_api::{
 
 const ERR_HINT: &str = "simdref not found. Install it: uv tool install simdref (or pip install simdref), then run isa update. Instructions: https://github.com/simd-labs/simdref";
 
+/// Pinned uv release. Bump UV_TAG to move to a newer uv.
+const UV_TAG: &str = "0.12.23";
+
 struct Simdref;
 
 /// True when a regular file or a symlink exists at `path`. The WASI sandbox
@@ -92,8 +95,6 @@ fn ensure_uv(id: &LanguageServerId, work: &Path) -> Result<PathBuf> {
         return Ok(uv);
     }
     set_status(id, &Status::CheckingForUpdate);
-    // Pinned uv release. Bump UV_TAG to move to a newer uv.
-    const UV_TAG: &str = "0.12.23";
     let name = format!("{stem}.{suffix}");
     let url =
         format!("https://github.com/astral-sh/uv/releases/download/{UV_TAG}/{name}");
