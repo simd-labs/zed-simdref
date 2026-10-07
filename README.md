@@ -17,7 +17,7 @@ Zed needs this setting in `settings.json`:
 "inlay_hints": {"enabled": true}
 ```
 
-Inlay hints need simdref 0.0.8 or newer. The current PyPI release has none.
+Inlay hints need simdref 0.0.8 or newer (on PyPI). The extension installs it for you.
 
 ### Auto-install
 
