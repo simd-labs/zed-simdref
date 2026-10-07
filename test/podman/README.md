@@ -51,7 +51,7 @@ Environment settings:
 - `SETTINGS_JSON`: Zed settings file, default `test/podman/settings.json`.
 - `PODMAN_NETWORK`: podman network mode, default `slirp4netns`.
 
-For hints, the image must have `simdref-lsp` 0.0.8 or newer on the `PATH`. The base image does not.
+For hints, the image must have a new `simdref-lsp` on the `PATH`. The base image does not.
 
 ## Update the screenshots
 
@@ -59,4 +59,4 @@ The `screenshots` branch holds the top-level README screenshots. Replace its sin
 
 ## Exit status
 
-The container kills Zed and Sway, so an exit status of 137 or a kill message is usual. Read the logs, not the podman exit status.
+The container kills Zed and Sway. An exit status of 137 or a kill message is usual. Read the logs, not the podman exit status.
