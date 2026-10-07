@@ -1,0 +1,26 @@
+id = "simdref"
+name = "simdref"
+description = "SIMD instruction reference as LSP inlay hints for Assembly, C, and C++."
+version = "0.1.0"
+schema_version = 1
+authors = ["Marco Barbone <mbarbone@flatironinstitute.org>"]
+license = "GPL-3.0-or-later"
+repository = "https://github.com/simd-labs/zed-simdref"
+
+# The extension runs uv and isa by absolute path inside its work dir. The
+# manifest cannot name that path, so command is "*" and the arguments are fixed.
+capabilities = [
+    { kind = "download_file", host = "github.com", path = ["astral-sh", "uv", "**"] },
+    { kind = "process:exec", command = "*", args = ["-xf", "*", "-C", "*"] },
+    { kind = "process:exec", command = "*", args = ["tool", "install", "simdref"] },
+    { kind = "process:exec", command = "*", args = ["update"] },
+]
+
+[language_servers.simdref]
+name = "simdref"
+languages = ["Assembly", "C", "C++"]
+
+[language_servers.simdref.language_ids]
+"Assembly" = "asm"
+"C" = "c"
+"C++" = "cpp"

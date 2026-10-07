@@ -1,0 +1,12 @@
+[package]
+name = "zed-simdref"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+sha2 = "0.10"
+zed_extension_api = "0.7"
