@@ -56,6 +56,10 @@ Environment variables:
 
 For hints, `simdref-lsp` must be on the `PATH` in the image, in version 0.0.8 or newer. The base image does not have it.
 
+## Update the screenshots
+
+To update the screenshots in the main README, replace the single commit on the `screenshots` branch. It is an orphan branch. Force-push it. Never commit PNGs to `main`.
+
 ## Exit status
 
 The rig kills Zed and sway at the end of the run. An exit status of 137 or a kill message at the end is normal. Read the logs, not the exit status of podman.
