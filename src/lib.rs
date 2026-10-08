@@ -289,10 +289,11 @@ impl zed::Extension for Simdref {
         // stays as it is. The check runs before the server start command
         // returns, so it delays the start; the stamp file throttles the delay
         // to one network check a day.
-        if worktree.which("simdref-lsp").is_none() {
+        let path_install = worktree.which("simdref-lsp");
+        if path_install.is_none() {
             upgrade();
         }
-        let command = match worktree.which("simdref-lsp") {
+        let command = match path_install {
             Some(path) => path,
             None => match install(id) {
                 Ok(path) => {
