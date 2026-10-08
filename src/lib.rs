@@ -24,6 +24,32 @@ fn is_file(path: &Path) -> bool {
     fs::symlink_metadata(path).is_ok_and(|m| m.is_file() || m.file_type().is_symlink())
 }
 
+/// True when `stamp` is missing or older than 24 h.
+fn needs_check(stamp: &Path) -> bool {
+    const DAY: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
+    fs::metadata(stamp)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.elapsed().ok())
+        .is_none_or(|elapsed| elapsed > DAY)
+}
+
+/// True when `before` and `after` are both Some and differ.
+fn is_newer(before: Option<&str>, after: Option<&str>) -> bool {
+    matches!((before, after), (Some(b), Some(a)) if b != a)
+}
+
+/// Returns `isa --version` stdout, or None on any failure.
+fn version(isa: &Path, env: &[(&str, &str)]) -> Option<String> {
+    let out = Command::new(isa.to_string_lossy())
+        .args(["--version"])
+        .envs(env.iter().copied())
+        .output()
+        .ok()?;
+    (out.status == Some(0))
+        .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
 /// Release asset stem and archive suffix of uv for a platform.
 fn uv_asset(os: Os, arch: Architecture) -> (String, &'static str) {
     let arch = match arch {
@@ -166,6 +192,20 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
+/// Returns the environment for every command the extension runs. It keeps
+/// every uv write inside the work dir.
+fn work_env(work: &Path) -> Vec<(String, String)> {
+    [
+        ("UV_TOOL_DIR", work.join("tools")),
+        ("UV_TOOL_BIN_DIR", work.join("bin")),
+        ("UV_PYTHON_INSTALL_DIR", work.join("python")),
+        ("UV_CACHE_DIR", work.join("uv-cache")),
+    ]
+    .into_iter()
+    .map(|(k, v)| (k.to_string(), v.to_string_lossy().into_owned()))
+    .collect()
+}
+
 /// Returns the simdref-lsp path. It installs simdref into the work dir when needed.
 fn install(id: &LanguageServerId) -> Result<PathBuf> {
     let work = env::current_dir().map_err(|e| e.to_string())?;
@@ -178,20 +218,11 @@ fn install(id: &LanguageServerId) -> Result<PathBuf> {
     }
     let uv = ensure_uv(id, &work)?;
     set_status(id, &Status::Downloading);
-    // Keep every uv write inside the work dir.
-    let env = [
-        ("UV_TOOL_DIR", tools.to_string_lossy().into_owned()),
-        ("UV_TOOL_BIN_DIR", bin.to_string_lossy().into_owned()),
-        (
-            "UV_PYTHON_INSTALL_DIR",
-            work.join("python").to_string_lossy().into_owned(),
-        ),
-        (
-            "UV_CACHE_DIR",
-            work.join("uv-cache").to_string_lossy().into_owned(),
-        ),
-    ];
-    let env: Vec<(&str, &str)> = env.iter().map(|(k, v)| (*k, v.as_str())).collect();
+    let env_pairs = work_env(&work);
+    let env: Vec<(&str, &str)> = env_pairs
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect();
     let result = run(&uv, &["tool", "install", "simdref"], &env)
         .and_then(|()| run(&bin.join(exe("isa")), &["update"], &env))
         .and_then(|()| {
@@ -209,6 +240,41 @@ fn install(id: &LanguageServerId) -> Result<PathBuf> {
     result.map(|()| lsp)
 }
 
+/// Upgrades the simdref copy the extension installed in its work dir. A stamp
+/// file throttles the check to once a day. It calls `isa vaddps --short` to
+/// refresh the catalog only when the version changed. Every error is ignored:
+/// an older simdref is better than none.
+fn upgrade() -> Option<()> {
+    let work = env::current_dir().map_err(|e| e.to_string()).ok()?;
+    let (os, arch) = zed::current_platform();
+    let exe = |name: &str| if matches!(os, Os::Windows) { format!("{name}.exe") } else { name.to_string() };
+    let bin = work.join("bin");
+    let isa = bin.join(exe("isa"));
+    let uv = uv_path(os, &uv_asset(os, arch).0, &work);
+    if !is_file(&isa) || !is_file(&uv) {
+        return None;
+    }
+    // shortcut: the stamp uses file mtime, not wall time, so a fs clock jump
+    // can delay the check by a day. Upgrade to SystemTime when it matters.
+    let stamp = work.join("last-update-check");
+    if !needs_check(&stamp) {
+        return None;
+    }
+    fs::File::create(&stamp).ok()?;
+    let env_pairs = work_env(&work);
+    let env: Vec<(&str, &str)> = env_pairs
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect();
+    let before = version(&isa, &env);
+    run(&uv, &["tool", "upgrade", "simdref"], &env).ok()?;
+    let after = version(&isa, &env);
+    if is_newer(before.as_deref(), after.as_deref()) {
+        run(&isa, &["vaddps", "--short"], &env).ok()?;
+    }
+    Some(())
+}
+
 impl zed::Extension for Simdref {
     fn new() -> Self {
         Simdref
@@ -219,6 +285,13 @@ impl zed::Extension for Simdref {
         id: &LanguageServerId,
         worktree: &zed::Worktree,
     ) -> Result<zed::Command> {
+        // Only the copy the extension installed gets upgraded; a PATH install
+        // stays as it is. The check runs before the server start command
+        // returns, so it delays the start; the stamp file throttles the delay
+        // to one network check a day.
+        if worktree.which("simdref-lsp").is_none() {
+            upgrade();
+        }
         let command = match worktree.which("simdref-lsp") {
             Some(path) => path,
             None => match install(id) {
@@ -312,5 +385,31 @@ mod tests {
         let err = compare(&other, &got).unwrap_err();
         assert_eq!(err, "checksum mismatch");
         assert!(compare(&got, &got[..32]).is_err());
+    }
+
+    #[test]
+    fn needs_check_when_stamp_is_old_or_missing() {
+        let dir = env::temp_dir().join(format!("simdref-stamp-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let stamp = dir.join("last-update-check");
+        // A missing stamp means a check.
+        assert!(needs_check(&stamp));
+        // An old stamp means a check.
+        fs::write(&stamp, b"").unwrap();
+        let old = filetime::FileTime::from_unix_time(946_684_800, 0); // 2000-01-01
+        filetime::set_file_mtime(&stamp, old).unwrap();
+        assert!(needs_check(&stamp));
+        // A fresh stamp skips the check.
+        filetime::set_file_mtime(&stamp, filetime::FileTime::now()).unwrap();
+        assert!(!needs_check(&stamp));
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn is_newer_only_on_a_version_change() {
+        assert!(is_newer(Some("0.1.0"), Some("0.2.0")));
+        assert!(!is_newer(Some("0.2.0"), Some("0.2.0")));
+        assert!(!is_newer(None, Some("0.2.0")));
+        assert!(!is_newer(Some("0.1.0"), None));
     }
 }
