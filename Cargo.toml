@@ -10,6 +10,3 @@ crate-type = ["cdylib"]
 [dependencies]
 sha2 = "0.10"
 zed_extension_api = "0.7"
-
-[dev-dependencies]
-filetime = "0.2"

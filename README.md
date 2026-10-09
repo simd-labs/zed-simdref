@@ -21,7 +21,7 @@ The extension installs the newest simdref.
 
 ## Auto-update
 
-The extension upgrades the simdref copy it installed once a day. The daily check runs at language-server start. It takes about 0.4 s, and about 14 s on the day a new simdref version downloads its catalog.
+The extension upgrades the simdref copy it installed once a day. The daily check runs at language-server start. It takes about 0.4 s, and about 14 s on the day a new simdref version downloads its catalog. A stalled download can stretch that to about 8 minutes: uv retries each HTTP read, each read can take up to 120 s (UV_HTTP_TIMEOUT), and simdref's catalog download gives up after 120 s.
 
 ## Auto-install
 

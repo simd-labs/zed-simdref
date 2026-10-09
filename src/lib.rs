@@ -214,8 +214,8 @@ fn install(id: &LanguageServerId) -> Result<PathBuf> {
     result.map(|()| lsp)
 }
 
-/// Upgrades the simdref copy the extension installed in its work dir. A stamp
-/// file throttles the check to once a day. The run then ends with
+/// Upgrades the simdref copy the extension installed in its work dir. A marker
+/// file per UTC day throttles the check. The run then ends with
 /// `isa vaddps --short`; it costs 0.4 s and 0 bytes when the catalog is
 /// current. Every error is ignored: an older simdref is better than none.
 fn upgrade() -> Option<()> {
@@ -239,48 +239,42 @@ where
     if !is_file(isa) || !is_file(uv) {
         return None;
     }
-    // shortcut: the stamp and the lock use file mtime, not wall time, so a fs
-    // clock jump can delay the check by a day. Upgrade to SystemTime when it matters.
-    let lock = work.join("update.lock");
-    if !needs_check_at(&lock, LOCK_INTERVAL) {
-        return None;
+    // shortcut: a check still running at midnight UTC can overlap the next
+    // day's check, add an OS lock if that is ever reported.
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_secs();
+    let marker = work.join(format!("update-{}", secs / 86_400));
+    fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&marker)
+        .ok()?;
+    // Stale markers of older days go away. Ignore errors: the check must run.
+    if let Ok(entries) = fs::read_dir(work) {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if name.starts_with("update-") && entry.path() != marker {
+                fs::remove_file(entry.path()).ok();
+            }
+        }
     }
-    fs::remove_file(&lock).ok();
-    let guard = fs::OpenOptions::new().create_new(true).write(true).open(&lock).ok()?;
-    drop(guard);
-    let stamp = work.join("last-update-check");
-    if !needs_check_at(&stamp, DAY) {
-        fs::remove_file(&lock).ok();
-        return None;
-    }
-    if fs::File::create(&stamp).is_err() {
-        fs::remove_file(&lock).ok();
-        return None;
-    }
-    let env_pairs = work_env(work);
+    let mut env_pairs = work_env(work);
+    env_pairs.push(("UV_HTTP_TIMEOUT".to_string(), "120".to_string()));
     let env: Vec<(&str, &str)> = env_pairs
         .iter()
         .map(|(k, v)| (k.as_str(), v.as_str()))
         .collect();
     // zed::Command has no timeout; a hung upgrade blocks the language-server start.
+    // UV_HTTP_TIMEOUT bounds each uv HTTP read at 120 s. simdref's httpx
+    // download uses a 120 s timeout per asset.
     let upgrade = run(uv, &["tool", "upgrade", "simdref"], &env);
     // Always refresh the catalog, even when the upgrade failed; the existing
     // simdref still works and `vaddps --short` costs 0.4 s when current.
     run(isa, &["vaddps", "--short"], &env);
-    fs::remove_file(&lock).ok();
     upgrade
-}
-
-const DAY: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
-const LOCK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30 * 60);
-
-/// True when `stamp` is missing or older than `interval`.
-fn needs_check_at(stamp: &Path, interval: std::time::Duration) -> bool {
-    fs::metadata(stamp)
-        .and_then(|m| m.modified())
-        .ok()
-        .and_then(|t| t.elapsed().ok())
-        .is_none_or(|elapsed| elapsed > interval)
 }
 
 impl zed::Extension for Simdref {
@@ -295,8 +289,8 @@ impl zed::Extension for Simdref {
     ) -> Result<zed::Command> {
         // Only the copy the extension installed gets upgraded; a PATH install
         // stays as it is. The check runs before the server start command
-        // returns, so it delays the start; the stamp file throttles the delay
-        // to one network check a day.
+        // returns, so it delays the start; the per-day marker file throttles
+        // the delay to one network check a day.
         let path_install = worktree.which("simdref-lsp");
         if path_install.is_none() {
             upgrade();
@@ -396,22 +390,12 @@ mod tests {
         assert!(compare(&got, &got[..32]).is_err());
     }
 
-    #[test]
-    fn needs_check_when_stamp_is_old_or_missing() {
-        let dir = env::temp_dir().join(format!("simdref-stamp-{}", std::process::id()));
-        fs::create_dir_all(&dir).unwrap();
-        let stamp = dir.join("last-update-check");
-        // A missing stamp means a check.
-        assert!(needs_check_at(&stamp, DAY));
-        // An old stamp means a check.
-        fs::write(&stamp, b"").unwrap();
-        let old = filetime::FileTime::from_unix_time(946_684_800, 0); // 2000-01-01
-        filetime::set_file_mtime(&stamp, old).unwrap();
-        assert!(needs_check_at(&stamp, DAY));
-        // A fresh stamp skips the check.
-        filetime::set_file_mtime(&stamp, filetime::FileTime::now()).unwrap();
-        assert!(!needs_check_at(&stamp, DAY));
-        fs::remove_dir_all(&dir).ok();
+    fn today_marker_name() -> String {
+        let secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        format!("update-{}", secs / 86_400)
     }
 
     /// Work dir with bin/isa and a uv binary. Returns the work dir PathBuf,
@@ -449,9 +433,15 @@ mod tests {
     }
 
     #[test]
-    fn upgrade_with_stale_stamp_runs_upgrade_and_vaddps() {
+    fn upgrade_with_no_marker_runs_upgrade_and_vaddps_and_creates_today_marker() {
         let (work, isa, uv, log, run) = upgrade_rig(|_| Some(()));
-        // No last-update-check file means the stamp is stale.
+        // Yesterday's marker is present but must be cleaned up.
+        let secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let yesterday = work.join(format!("update-{}", secs / 86_400 - 1));
+        fs::write(&yesterday, b"").unwrap();
         let result = upgrade_with(&work, &isa, &uv, run);
         assert!(result.is_some());
         let cmds = log.borrow();
@@ -459,54 +449,29 @@ mod tests {
         assert!(cmds[0].ends_with("tool upgrade simdref"), "cmd: {}", cmds[0]);
         assert!(cmds[1].ends_with("vaddps --short"), "cmd: {}", cmds[1]);
         drop(cmds);
-        assert!(!work.join("update.lock").exists());
+        assert!(work.join(today_marker_name()).exists());
+        assert!(!yesterday.exists());
         fs::remove_dir_all(&work).ok();
     }
 
     #[test]
-    fn upgrade_with_fresh_stamp_runs_nothing() {
+    fn upgrade_with_today_marker_runs_nothing() {
         let (work, isa, uv, log, run) = upgrade_rig(|_| Some(()));
-        fs::write(work.join("last-update-check"), b"").unwrap();
+        fs::write(work.join(today_marker_name()), b"").unwrap();
         let result = upgrade_with(&work, &isa, &uv, run);
         assert!(result.is_none());
         assert!(log.borrow().is_empty());
-        assert!(!work.join("update.lock").exists());
         fs::remove_dir_all(&work).ok();
     }
 
     #[test]
-    fn upgrade_with_fresh_lock_runs_nothing_and_leaves_lock() {
-        let (work, isa, uv, log, run) = upgrade_rig(|_| Some(()));
-        fs::write(work.join("update.lock"), b"").unwrap();
-        let result = upgrade_with(&work, &isa, &uv, run);
-        assert!(result.is_none());
-        assert!(log.borrow().is_empty());
-        assert!(work.join("update.lock").exists());
-        fs::remove_dir_all(&work).ok();
-    }
-
-    #[test]
-    fn upgrade_with_old_lock_takes_over_and_removes_it() {
-        let (work, isa, uv, log, run) = upgrade_rig(|_| Some(()));
-        let lock = work.join("update.lock");
-        fs::write(&lock, b"").unwrap();
-        let old = filetime::FileTime::from_unix_time(946_684_800, 0); // 2000-01-01
-        filetime::set_file_mtime(&lock, old).unwrap();
-        let result = upgrade_with(&work, &isa, &uv, run);
-        assert!(result.is_some());
-        assert_eq!(log.borrow().len(), 2);
-        assert!(!lock.exists());
-        fs::remove_dir_all(&work).ok();
-    }
-
-    #[test]
-    fn upgrade_with_failed_upgrade_removes_lock() {
+    fn upgrade_with_failed_upgrade_still_runs_vaddps() {
         let (work, isa, uv, log, run) = upgrade_rig(|_| None);
         let result = upgrade_with(&work, &isa, &uv, run);
         assert!(result.is_none());
         // Even a failed upgrade ends with `vaddps --short` on the installed copy.
         assert_eq!(log.borrow().len(), 2);
-        assert!(!work.join("update.lock").exists());
+        assert!(work.join(today_marker_name()).exists());
         fs::remove_dir_all(&work).ok();
     }
 }
