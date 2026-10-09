@@ -230,8 +230,7 @@ fn upgrade() -> Option<()> {
     })
 }
 
-/// Runs the daily upgrade sequence through a run closure. Work dir, isa path,
-/// and uv path come from the caller so tests control the filesystem layout.
+/// Runs the daily upgrade sequence through a run closure.
 fn upgrade_with<R>(work: &Path, isa: &Path, uv: &Path, run: R) -> Option<()>
 where
     R: Fn(&Path, &[&str], &[(&str, &str)]) -> Option<()>,
@@ -398,9 +397,7 @@ mod tests {
         format!("update-{}", secs / 86_400)
     }
 
-    /// Work dir with bin/isa and a uv binary. Returns the work dir PathBuf,
-    /// the isa and uv paths, the recorded commands, and the run closure for
-    /// upgrade_with. `outcome` returns Some(()) on success, None on failure.
+    /// Work dir with bin/isa and a uv binary. `outcome` returns Some(()) on success, None on failure.
     fn upgrade_rig<R>(outcome: R) -> (
         PathBuf,
         PathBuf,
