@@ -15,7 +15,6 @@ capabilities = [
     { kind = "process:exec", command = "*", args = ["tool", "install", "simdref"] },
     { kind = "process:exec", command = "*", args = ["update"] },
     { kind = "process:exec", command = "*", args = ["tool", "upgrade", "simdref"] },
-    { kind = "process:exec", command = "*", args = ["--version"] },
     { kind = "process:exec", command = "*", args = ["vaddps", "--short"] },
 ]
 

@@ -24,32 +24,6 @@ fn is_file(path: &Path) -> bool {
     fs::symlink_metadata(path).is_ok_and(|m| m.is_file() || m.file_type().is_symlink())
 }
 
-/// True when `stamp` is missing or older than the once a day interval.
-fn needs_check(stamp: &Path) -> bool {
-    const DAY: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
-    fs::metadata(stamp)
-        .and_then(|m| m.modified())
-        .ok()
-        .and_then(|t| t.elapsed().ok())
-        .is_none_or(|elapsed| elapsed > DAY)
-}
-
-/// True when `before` and `after` are both Some and differ.
-fn is_newer(before: Option<&str>, after: Option<&str>) -> bool {
-    matches!((before, after), (Some(b), Some(a)) if b != a)
-}
-
-/// Returns `isa --version` stdout, or None on any failure.
-fn version(isa: &Path, env: &[(&str, &str)]) -> Option<String> {
-    let out = Command::new(isa.to_string_lossy())
-        .args(["--version"])
-        .envs(env.iter().copied())
-        .output()
-        .ok()?;
-    (out.status == Some(0))
-        .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
-}
-
 /// Release asset stem and archive suffix of uv for a platform.
 fn uv_asset(os: Os, arch: Architecture) -> (String, &'static str) {
     let arch = match arch {
@@ -241,33 +215,42 @@ fn install(id: &LanguageServerId) -> Result<PathBuf> {
 }
 
 /// Upgrades the simdref copy the extension installed in its work dir. A stamp
-/// file throttles the check to once a day. It calls `isa vaddps --short` to
-/// refresh the catalog only when the version changed. Every error is ignored:
-/// an older simdref is better than none.
+/// file throttles the check to once a day. The run then ends with
+/// `isa vaddps --short`; it costs 0.4 s and 0 bytes when the catalog is
+/// current. Every error is ignored: an older simdref is better than none.
 fn upgrade() -> Option<()> {
     let work = env::current_dir().map_err(|e| e.to_string()).ok()?;
     let (os, arch) = zed::current_platform();
     let exe = |name: &str| if matches!(os, Os::Windows) { format!("{name}.exe") } else { name.to_string() };
     let isa = work.join("bin").join(exe("isa"));
     let uv = uv_path(os, &uv_asset(os, arch).0, &work);
-    upgrade_with(&work, &isa, &uv, |p, a, e| run(p, a, e), |i, e| version(i, e))
+    upgrade_with(&work, &isa, &uv, |p, a, e| {
+        run(p, a, e).ok()?;
+        Some(())
+    })
 }
 
-/// Runs the daily upgrade sequence through a run closure and a version
-/// closure. Work dir, isa path, and uv path come from the caller so tests
-/// control the filesystem layout.
-fn upgrade_with<R, V>(work: &Path, isa: &Path, uv: &Path, run: R, version: V) -> Option<()>
+/// Runs the daily upgrade sequence through a run closure. Work dir, isa path,
+/// and uv path come from the caller so tests control the filesystem layout.
+fn upgrade_with<R>(work: &Path, isa: &Path, uv: &Path, run: R) -> Option<()>
 where
-    R: Fn(&Path, &[&str], &[(&str, &str)]) -> Result<()>,
-    V: Fn(&Path, &[(&str, &str)]) -> Option<String>,
+    R: Fn(&Path, &[&str], &[(&str, &str)]) -> Option<()>,
 {
     if !is_file(isa) || !is_file(uv) {
         return None;
     }
-    // shortcut: the stamp uses file mtime, not wall time, so a fs clock jump
-    // can delay the check by a day. Upgrade to SystemTime when it matters.
+    // shortcut: the stamp and the lock use file mtime, not wall time, so a fs
+    // clock jump can delay the check by a day. Upgrade to SystemTime when it matters.
+    let lock = work.join("update.lock");
+    if !needs_check_at(&lock, LOCK_INTERVAL) {
+        return None;
+    }
+    fs::remove_file(&lock).ok();
+    let guard = fs::OpenOptions::new().create_new(true).write(true).open(&lock).ok()?;
+    drop(guard);
     let stamp = work.join("last-update-check");
-    if !needs_check(&stamp) {
+    if !needs_check_at(&stamp, DAY) {
+        fs::remove_file(&lock).ok()?;
         return None;
     }
     fs::File::create(&stamp).ok()?;
@@ -276,13 +259,25 @@ where
         .iter()
         .map(|(k, v)| (k.as_str(), v.as_str()))
         .collect();
-    let before = version(isa, &env);
-    run(uv, &["tool", "upgrade", "simdref"], &env).ok()?;
-    let after = version(isa, &env);
-    if is_newer(before.as_deref(), after.as_deref()) {
-        run(isa, &["vaddps", "--short"], &env).ok()?;
+    // zed::Command has no timeout; a hung upgrade blocks the language-server start.
+    let upgrade = run(uv, &["tool", "upgrade", "simdref"], &env);
+    if upgrade.is_some() {
+        run(isa, &["vaddps", "--short"], &env);
     }
-    Some(())
+    fs::remove_file(&lock).ok()?;
+    upgrade
+}
+
+const DAY: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
+const LOCK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+
+/// True when `stamp` is missing or older than `interval`.
+fn needs_check_at(stamp: &Path, interval: std::time::Duration) -> bool {
+    fs::metadata(stamp)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.elapsed().ok())
+        .is_none_or(|elapsed| elapsed > interval)
 }
 
 impl zed::Extension for Simdref {
@@ -404,39 +399,31 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         let stamp = dir.join("last-update-check");
         // A missing stamp means a check.
-        assert!(needs_check(&stamp));
+        assert!(needs_check_at(&stamp, DAY));
         // An old stamp means a check.
         fs::write(&stamp, b"").unwrap();
         let old = filetime::FileTime::from_unix_time(946_684_800, 0); // 2000-01-01
         filetime::set_file_mtime(&stamp, old).unwrap();
-        assert!(needs_check(&stamp));
+        assert!(needs_check_at(&stamp, DAY));
         // A fresh stamp skips the check.
         filetime::set_file_mtime(&stamp, filetime::FileTime::now()).unwrap();
-        assert!(!needs_check(&stamp));
+        assert!(!needs_check_at(&stamp, DAY));
         fs::remove_dir_all(&dir).ok();
     }
 
-    #[test]
-    fn is_newer_only_on_a_version_change() {
-        assert!(is_newer(Some("0.1.0"), Some("0.2.0")));
-        assert!(!is_newer(Some("0.2.0"), Some("0.2.0")));
-        assert!(!is_newer(None, Some("0.2.0")));
-        assert!(!is_newer(Some("0.1.0"), None));
-    }
-
     /// Work dir with bin/isa and a uv binary. Returns the work dir PathBuf,
-    /// the isa and uv paths, the recorded commands, and the closures for
-    /// upgrade_with. `versions` gives isa --version output per call index.
-    fn upgrade_rig(
-        versions: Vec<Option<&'static str>>,
-    ) -> (
+    /// the isa and uv paths, the recorded commands, and the run closure for
+    /// upgrade_with. `outcome` returns Some(()) on success, None on failure.
+    fn upgrade_rig<R>(outcome: R) -> (
         PathBuf,
         PathBuf,
         PathBuf,
         std::rc::Rc<std::cell::RefCell<Vec<String>>>,
-        impl Fn(&Path, &[&str], &[(&str, &str)]) -> Result<()>,
-        impl Fn(&Path, &[(&str, &str)]) -> Option<String>,
-    ) {
+        impl Fn(&Path, &[&str], &[(&str, &str)]) -> Option<()>,
+    )
+    where
+        R: Fn(&Path) -> Option<()>,
+    {
         let work = env::temp_dir().join(format!(
             "simdref-rig-{}-{:?}",
             std::process::id(),
@@ -451,74 +438,70 @@ mod tests {
         fs::write(&uv, b"#!/bin/sh\n").unwrap();
         let log = std::rc::Rc::new(std::cell::RefCell::new(Vec::<String>::new()));
         let log2 = log.clone();
-        let run = move |p: &Path, a: &[&str], _env: &[(&str, &str)]| -> Result<()> {
+        let run = move |p: &Path, a: &[&str], _env: &[(&str, &str)]| -> Option<()> {
             log2.borrow_mut().push(format!("{} {}", p.display(), a.join(" ")));
-            Ok(())
+            outcome(p)
         };
-        let count = std::cell::Cell::new(0usize);
-        let versions = std::cell::RefCell::new(versions);
-        let version = move |_i: &Path, _env: &[(&str, &str)]| -> Option<String> {
-            let idx = count.get();
-            count.set(idx + 1);
-            versions.borrow().get(idx).copied().flatten().map(str::to_string)
-        };
-        (work, isa, uv, log, run, version)
+        (work, isa, uv, log, run)
     }
 
     #[test]
-    fn upgrade_with_fresh_stamp_runs_nothing() {
-        let (work, isa, uv, log, run, version) = upgrade_rig(vec![Some("1.0")]);
-        fs::write(work.join("last-update-check"), b"").unwrap();
-        let result = upgrade_with(&work, &isa, &uv, run, version);
-        assert!(result.is_none());
-        assert!(log.borrow().is_empty());
-        fs::remove_dir_all(&work).ok();
-    }
-
-    #[test]
-    fn upgrade_with_stale_stamp_runs_upgrade_and_no_refresh_on_same_version() {
-        let (work, isa, uv, log, run, version) = upgrade_rig(vec![Some("1.0"), Some("1.0")]);
-        let result = upgrade_with(&work, &isa, &uv, run, version);
-        assert!(result.is_some());
-        let cmds = log.borrow();
-        assert_eq!(cmds.len(), 1);
-        assert!(cmds[0].ends_with("tool upgrade simdref"), "cmd: {}", cmds[0]);
-        drop(cmds);
-        fs::remove_dir_all(&work).ok();
-    }
-
-    #[test]
-    fn upgrade_with_stale_stamp_runs_refresh_once_on_changed_version() {
-        let (work, isa, uv, log, run, version) = upgrade_rig(vec![Some("1.0"), Some("2.0")]);
-        let result = upgrade_with(&work, &isa, &uv, run, version);
+    fn upgrade_with_stale_stamp_runs_upgrade_and_vaddps() {
+        let (work, isa, uv, log, run) = upgrade_rig(|_| Some(()));
+        // No last-update-check file means the stamp is stale.
+        let result = upgrade_with(&work, &isa, &uv, run);
         assert!(result.is_some());
         let cmds = log.borrow();
         assert_eq!(cmds.len(), 2);
         assert!(cmds[0].ends_with("tool upgrade simdref"), "cmd: {}", cmds[0]);
         assert!(cmds[1].ends_with("vaddps --short"), "cmd: {}", cmds[1]);
         drop(cmds);
+        assert!(!work.join("update.lock").exists());
         fs::remove_dir_all(&work).ok();
     }
 
     #[test]
-    fn upgrade_with_unreadable_version_after_upgrade_runs_no_refresh() {
-        // isa --version fails after upgrade: None means unreadable.
-        let (work, isa, uv, log, run, version) = upgrade_rig(vec![Some("1.0"), None]);
-        let result = upgrade_with(&work, &isa, &uv, run, version);
-        assert!(result.is_some());
-        let cmds = log.borrow();
-        assert_eq!(cmds.len(), 1);
-        assert!(cmds[0].ends_with("tool upgrade simdref"), "cmd: {}", cmds[0]);
-        drop(cmds);
+    fn upgrade_with_fresh_stamp_runs_nothing() {
+        let (work, isa, uv, log, run) = upgrade_rig(|_| Some(()));
+        fs::write(work.join("last-update-check"), b"").unwrap();
+        let result = upgrade_with(&work, &isa, &uv, run);
+        assert!(result.is_none());
+        assert!(log.borrow().is_empty());
         fs::remove_dir_all(&work).ok();
     }
 
     #[test]
-    fn upgrade_with_both_versions_unreadable_runs_no_refresh() {
-        let (work, isa, uv, log, run, version) = upgrade_rig(vec![None, None]);
-        let result = upgrade_with(&work, &isa, &uv, run, version);
+    fn upgrade_with_fresh_lock_runs_nothing_and_leaves_lock() {
+        let (work, isa, uv, log, run) = upgrade_rig(|_| Some(()));
+        fs::write(work.join("update.lock"), b"").unwrap();
+        let result = upgrade_with(&work, &isa, &uv, run);
+        assert!(result.is_none());
+        assert!(log.borrow().is_empty());
+        assert!(work.join("update.lock").exists());
+        fs::remove_dir_all(&work).ok();
+    }
+
+    #[test]
+    fn upgrade_with_old_lock_takes_over_and_removes_it() {
+        let (work, isa, uv, log, run) = upgrade_rig(|_| Some(()));
+        let lock = work.join("update.lock");
+        fs::write(&lock, b"").unwrap();
+        let old = filetime::FileTime::from_unix_time(946_684_800, 0); // 2000-01-01
+        filetime::set_file_mtime(&lock, old).unwrap();
+        let result = upgrade_with(&work, &isa, &uv, run);
         assert!(result.is_some());
+        assert_eq!(log.borrow().len(), 2);
+        assert!(!lock.exists());
+        fs::remove_dir_all(&work).ok();
+    }
+
+    #[test]
+    fn upgrade_with_failed_upgrade_removes_lock() {
+        let (work, isa, uv, log, run) = upgrade_rig(|_| None);
+        let result = upgrade_with(&work, &isa, &uv, run);
+        assert!(result.is_none());
         assert_eq!(log.borrow().len(), 1);
+        assert!(!work.join("update.lock").exists());
         fs::remove_dir_all(&work).ok();
     }
 }
