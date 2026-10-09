@@ -19,6 +19,10 @@ Zed must have this setting in `settings.json`:
 
 The extension installs the newest simdref.
 
+## Auto-update
+
+The extension upgrades the simdref copy it installed once a day. The daily check runs at language-server start. It takes about 0.4 s, and about 14 s on the day a new simdref version downloads its catalog.
+
 ## Auto-install
 
 The extension looks for `simdref-lsp` on the `PATH` first. If it finds none, it downloads the `uv` release from `astral-sh/uv` and checks it against the `.sha256` file from that release. It then installs simdref and its catalog. All files stay in the extension work directory of Zed.
