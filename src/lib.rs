@@ -250,10 +250,13 @@ where
     drop(guard);
     let stamp = work.join("last-update-check");
     if !needs_check_at(&stamp, DAY) {
-        fs::remove_file(&lock).ok()?;
+        fs::remove_file(&lock).ok();
         return None;
     }
-    fs::File::create(&stamp).ok()?;
+    if fs::File::create(&stamp).is_err() {
+        fs::remove_file(&lock).ok();
+        return None;
+    }
     let env_pairs = work_env(work);
     let env: Vec<(&str, &str)> = env_pairs
         .iter()
@@ -261,10 +264,10 @@ where
         .collect();
     // zed::Command has no timeout; a hung upgrade blocks the language-server start.
     let upgrade = run(uv, &["tool", "upgrade", "simdref"], &env);
-    if upgrade.is_some() {
-        run(isa, &["vaddps", "--short"], &env);
-    }
-    fs::remove_file(&lock).ok()?;
+    // Always refresh the catalog, even when the upgrade failed; the existing
+    // simdref still works and `vaddps --short` costs 0.4 s when current.
+    run(isa, &["vaddps", "--short"], &env);
+    fs::remove_file(&lock).ok();
     upgrade
 }
 
@@ -467,6 +470,7 @@ mod tests {
         let result = upgrade_with(&work, &isa, &uv, run);
         assert!(result.is_none());
         assert!(log.borrow().is_empty());
+        assert!(!work.join("update.lock").exists());
         fs::remove_dir_all(&work).ok();
     }
 
@@ -500,7 +504,8 @@ mod tests {
         let (work, isa, uv, log, run) = upgrade_rig(|_| None);
         let result = upgrade_with(&work, &isa, &uv, run);
         assert!(result.is_none());
-        assert_eq!(log.borrow().len(), 1);
+        // Even a failed upgrade ends with `vaddps --short` on the installed copy.
+        assert_eq!(log.borrow().len(), 2);
         assert!(!work.join("update.lock").exists());
         fs::remove_dir_all(&work).ok();
     }
